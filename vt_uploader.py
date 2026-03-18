@@ -1,16 +1,3 @@
-"""VirusTotal File Scanner (GUI)
-
-This tool keeps the existing VirusTotal logic (hashing, report checking, uploading,
-analysis polling) but presents it in a simple customtkinter UI.
-
-Usage:
-    python vt_uploader.py "C:\path\to\file.ext"
-
-The GUI will start immediately and begin scanning the provided file.
-"""
-
-from __future__ import annotations
-
 import argparse
 import hashlib
 import os
@@ -25,148 +12,75 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 import requests
-
 import customtkinter as ctk
 
-# Optional dotenv support (not required if env var is already set)
+# Optional dotenv support to load API keys from a .env file
 try:
-    from dotenv import load_dotenv  # type: ignore
-
+    from dotenv import load_dotenv
     _HAS_DOTENV = True
-except ImportError:  # pragma: no cover
+except ImportError:
     _HAS_DOTENV = False
 
-
+# Configuration constants
 VT_API_KEY_ENV = "VT_API_KEY"
 VT_API_BASE = "https://www.virustotal.com/api/v3"
 
-
 @dataclass
 class AnalysisSummary:
+    """Stores a cleaned-up version of the VirusTotal analysis report."""
     sha256: str
     total_engines: int
     malicious: int
     suspicious: int
     report_url: str
     last_scan_date: str = ""
-
+    relative_time: str = ""
 
 def load_api_key() -> str:
-    """Load VirusTotal API key from env var or optional .env file."""
-
+    """Retrieves the API key from environment variables or .env file."""
     if _HAS_DOTENV:
-        load_dotenv(dotenv_path=".env")
-
+        from dotenv import load_dotenv as _load_dotenv_func
+        _load_dotenv_func(dotenv_path=".env")
+    
     api_key = os.getenv(VT_API_KEY_ENV)
     if not api_key:
-        raise RuntimeError(
-            f"VirusTotal API key not found. Set {VT_API_KEY_ENV} in your environment or in a .env file."
-        )
+        raise RuntimeError(f"VirusTotal API key not found. Please set {VT_API_KEY_ENV}.")
     return api_key.strip()
 
-
-def sha256_of_file(path: Path, chunk_size: int = 16 * 1024) -> str:
-    """Compute SHA-256 hash for a file in streaming fashion."""
-
+def sha256_of_file(path: Path, chunk_size: int = 64 * 1024) -> str:
+    """Generates a SHA-256 hash of a file efficiently using chunks."""
     hasher = hashlib.sha256()
     with path.open("rb") as f:
         for chunk in iter(lambda: f.read(chunk_size), b""):
             hasher.update(chunk)
     return hasher.hexdigest()
 
-
 def vt_headers(api_key: str) -> Dict[str, str]:
+    """Returns standardized headers for VirusTotal API requests."""
     return {"x-apikey": api_key}
 
-
-def get_file_report(api_key: str, file_hash: str) -> Optional[Dict[str, Any]]:
-    """Query VirusTotal for an existing file report by hash."""
-
-    url = f"{VT_API_BASE}/files/{file_hash}"
-    resp = requests.get(url, headers=vt_headers(api_key), timeout=60)
-
-    if resp.status_code == 200:
-        return resp.json()
-
-    if resp.status_code == 404:
-        return None
-
-    resp.raise_for_status()
-    return None
-
-
-def poll_analysis(api_key: str, analysis_id: str, poll_interval: int = 15, max_attempts: int = 80) -> Dict[str, Any]:
-    """Poll until the analysis status is completed."""
-
-    url = f"{VT_API_BASE}/analyses/{analysis_id}"
-
-    for attempt in range(1, max_attempts + 1):
-        resp = requests.get(url, headers=vt_headers(api_key), timeout=60)
-        resp.raise_for_status()
-        data = resp.json().get("data", {})
-        attributes = data.get("attributes", {})
-        status = attributes.get("status")
-
-        if status == "completed":
-            return data
-
-        if status is None:
-            raise RuntimeError("Unexpected response structure from VirusTotal analysis endpoint.")
-
-        time.sleep(poll_interval)
-
-    raise TimeoutError(
-        f"Analysis did not complete within {poll_interval * max_attempts} seconds (max attempts: {max_attempts})."
-    )
-
-
-def reanalyse_file(api_key: str, file_hash: str) -> Dict[str, Any]:
-    """Trigger re-analysis for an existing file on VirusTotal."""
-
-    url = f"{VT_API_BASE}/files/{file_hash}/analyse"
-    resp = requests.post(url, headers=vt_headers(api_key), timeout=60)
-    resp.raise_for_status()
-    return resp.json().get("data", {})
-    """Upload a file to VirusTotal and return the analysis response data."""
-
-    size = file_path.stat().st_size
-
-    if size <= 32 * 1024 * 1024:
-        url = f"{VT_API_BASE}/files"
-        with file_path.open("rb") as f:
-            files = {"file": (file_path.name, f)}
-            resp = requests.post(url, headers=vt_headers(api_key), files=files, timeout=300)
-
-    else:
-        url = f"{VT_API_BASE}/files/upload_url"
-        resp = requests.get(url, headers=vt_headers(api_key), timeout=60)
-        resp.raise_for_status()
-        upload_url = resp.json().get("data")
-
-        if not upload_url or not isinstance(upload_url, str):
-            raise RuntimeError("Failed to retrieve upload URL from VirusTotal.")
-
-        with file_path.open("rb") as f:
-            files = {"file": (file_path.name, f)}
-            resp = requests.post(upload_url, headers=vt_headers(api_key), files=files, timeout=300)
-
-    resp.raise_for_status()
-    return resp.json().get("data", {})
-
-
 def summarize_report(data: Dict[str, Any]) -> AnalysisSummary:
-    """Extract a clean summary from VirusTotal report data."""
-
+    """Parses raw VirusTotal JSON data into a clean AnalysisSummary object."""
     attributes = data.get("attributes", {})
     stats = attributes.get("stats", {})
     sha256 = attributes.get("sha256") or attributes.get("md5") or ""
     report_url = f"https://www.virustotal.com/gui/file/{sha256}/detection" if sha256 else ""
 
-    last_scan_date = ""
+    last_scan_str = ""
+    rel_time = ""
+    
+    # Calculate relative time (e.g., '2 days ago')
     if "last_analysis_date" in attributes:
-        timestamp = attributes["last_analysis_date"]
-        dt = datetime.fromtimestamp(timestamp)
-        last_scan_date = dt.strftime("%d/%m/%Y %H:%M")
+        ts = attributes["last_analysis_date"]
+        dt = datetime.fromtimestamp(ts)
+        last_scan_str = dt.strftime("%d/%m/%Y %H:%M")
+        
+        diff = datetime.now() - dt
+        if diff.days > 0:
+            rel_time = f"({diff.days} days ago)"
+        else:
+            hours = diff.seconds // 3600
+            rel_time = f"({hours} hours ago)" if hours > 0 else "(Just now)"
 
     return AnalysisSummary(
         sha256=sha256,
@@ -174,15 +88,88 @@ def summarize_report(data: Dict[str, Any]) -> AnalysisSummary:
         malicious=stats.get("malicious", 0),
         suspicious=stats.get("suspicious", 0),
         report_url=report_url,
-        last_scan_date=last_scan_date,
+        last_scan_date=last_scan_str,
+        relative_time=rel_time
     )
 
+# --- VirusTotal API Communication Functions ---
+
+def get_file_report(api_key: str, file_hash: str) -> Optional[Dict[str, Any]]:
+    url = f"{VT_API_BASE}/files/{file_hash}"
+    resp = requests.get(url, headers=vt_headers(api_key), timeout=60)
+    if resp.status_code == 200:
+        return resp.json()
+    if resp.status_code == 404:
+        return None
+    resp.raise_for_status()
+    return None
+
+def upload_file(api_key: str, file_path: Path) -> Dict[str, Any]:
+    """Uploads a file, supporting large files via a generated upload URL if needed."""
+    size = file_path.stat().st_size
+    max_size_allowed = 650 * 1024 * 1024  # VirusTotal's limit: ~650MB
+    
+    if size > max_size_allowed:
+        raise RuntimeError(
+            f"File size {size / (1024**2):.1f}MB exceeds VirusTotal's limit of 650MB. "
+            f"Please use a smaller file."
+        )
+    
+    if size <= 32 * 1024 * 1024:
+        url = f"{VT_API_BASE}/files"
+        with file_path.open("rb") as f:
+            files = {"file": (file_path.name, f)}
+            resp = requests.post(url, headers=vt_headers(api_key), files=files, timeout=300)
+    else:
+        # Request a special upload URL for files larger than 32MB
+        resp = requests.get(f"{VT_API_BASE}/files/upload_url", headers=vt_headers(api_key), timeout=60)
+        resp.raise_for_status()
+        upload_url = resp.json().get("data")
+        with file_path.open("rb") as f:
+            files = {"file": (file_path.name, f)}
+            # Larger timeout for big files (up to 30 minutes)
+            resp = requests.post(upload_url, headers=vt_headers(api_key), files=files, timeout=1800)
+    
+    resp.raise_for_status()
+    return resp.json().get("data", {})
+
+def poll_analysis(api_key: str, analysis_id: str) -> Dict[str, Any]:
+    """Polls the analysis status until completion with a maximum wait time."""
+    url = f"{VT_API_BASE}/analyses/{analysis_id}"
+    max_wait_seconds = 1200  # 20 minutes maximum
+    elapsed = 0
+    poll_interval = 15
+    
+    while elapsed < max_wait_seconds:
+        resp = requests.get(url, headers=vt_headers(api_key), timeout=60)
+        resp.raise_for_status()
+        data = resp.json().get("data", {})
+        if data.get("attributes", {}).get("status") == "completed":
+            # Analysis is complete, fetch the full file report now
+            file_id = data.get("meta", {}).get("file_info", {}).get("sha256")
+            report = get_file_report(api_key, file_id)
+            return report.get("data", {}) if report else {}
+        time.sleep(poll_interval)
+        elapsed += poll_interval
+    
+    raise TimeoutError(
+        "Analysis polling exceeded maximum wait time (20 minutes). "
+        "VirusTotal is still processing. Please try again later."
+    )
+
+def reanalyse_file(api_key: str, file_hash: str) -> Dict[str, Any]:
+    url = f"{VT_API_BASE}/files/{file_hash}/analyse"
+    resp = requests.post(url, headers=vt_headers(api_key), timeout=60)
+    resp.raise_for_status()
+    return resp.json().get("data", {})
+
+# --- GUI Application ---
 
 class VirusTotalScannerApp(ctk.CTk):
     def __init__(self, file_path: Path) -> None:
         super().__init__()
         self.title("VirusTotal File Scanner")
-        self.geometry("600x400")
+        self.geometry("620x420")
         self.resizable(False, False)
 
         self.file_path = file_path
@@ -194,165 +181,164 @@ class VirusTotalScannerApp(ctk.CTk):
         self.after(100, self._start_scan)
 
     def _build_ui(self) -> None:
+        """Initializes the UI layout using CustomTkinter components."""
         self.grid_rowconfigure(0, weight=1)
         self.grid_columnconfigure(0, weight=1)
 
-        self.container = ctk.CTkFrame(self, corner_radius=12)
-        self.container.grid(row=0, column=0, padx=20, pady=20, sticky="nsew")
-        self.container.grid_rowconfigure(0, weight=1)
+        self.container = ctk.CTkFrame(self, corner_radius=15)
+        self.container.grid(row=0, column=0, padx=25, pady=25, sticky="nsew")
         self.container.grid_columnconfigure(0, weight=1)
 
-        self.status_label = ctk.CTkLabel(self.container, text="Starting...", font=ctk.CTkFont(size=16, weight="bold"))
-        self.status_label.grid(row=0, column=0, pady=(20, 10), padx=20, sticky="n")
+        # Status Label (The Header)
+        self.status_label = ctk.CTkLabel(
+            self.container, text="Initializing Scan...", 
+            font=ctk.CTkFont(size=18, weight="bold")
+        )
+        self.status_label.grid(row=0, column=0, pady=(25, 15))
 
+        # Progress Spinner
         self.spinner = ctk.CTkProgressBar(self.container, mode="indeterminate")
-        self.spinner.grid(row=1, column=0, padx=40, pady=(0, 20), sticky="ew")
+        self.spinner.grid(row=1, column=0, padx=50, pady=(0, 25), sticky="ew")
 
-        self.result_frame = ctk.CTkFrame(self.container, corner_radius=12)
-        self.result_frame.grid(row=2, column=0, sticky="nsew", padx=20, pady=(0, 20))
+        # Results Display Area
+        self.result_frame = ctk.CTkFrame(self.container, corner_radius=12, fg_color="transparent")
+        self.result_frame.grid(row=2, column=0, sticky="nsew", padx=25, pady=(0, 25))
         self.result_frame.grid_columnconfigure(0, weight=1)
 
-        self.file_label = ctk.CTkLabel(self.result_frame, text="", font=ctk.CTkFont(size=14, weight="bold"))
-        self.sha_label = ctk.CTkLabel(self.result_frame, text="", font=ctk.CTkFont(size=12))
-        self.ratio_label = ctk.CTkLabel(self.result_frame, text="", font=ctk.CTkFont(size=12))
-        self.status_text = ctk.CTkLabel(self.result_frame, text="", font=ctk.CTkFont(size=12))
-        self.last_scan_label = ctk.CTkLabel(self.result_frame, text="", font=ctk.CTkFont(size=12))
+        # Result Labels (Hidden initially)
+        self.res_file = ctk.CTkLabel(self.result_frame, text="", font=ctk.CTkFont(size=14, weight="bold"), anchor="w")
+        self.res_info = ctk.CTkLabel(self.result_frame, text="", font=ctk.CTkFont(size=12), anchor="w")
+        self.res_ratio = ctk.CTkLabel(self.result_frame, text="", font=ctk.CTkFont(size=13, weight="bold"), anchor="w")
+        self.res_hash = ctk.CTkLabel(self.result_frame, text="", font=ctk.CTkFont(size=11), text_color="gray", anchor="w")
 
-        self.buttons_frame = ctk.CTkFrame(self.container, corner_radius=12)
-        self.buttons_frame.grid(row=3, column=0, sticky="ew", padx=20, pady=(0, 20))
+        # Control Buttons
+        self.buttons_frame = ctk.CTkFrame(self.container, fg_color="transparent")
+        self.buttons_frame.grid(row=3, column=0, sticky="ew", padx=25, pady=(0, 25))
         self.buttons_frame.grid_columnconfigure((0, 1, 2), weight=1)
 
-        self.scan_again_btn = ctk.CTkButton(
-            self.buttons_frame, text="Scan Again / Force Re-upload", command=self._on_scan_again, state="disabled"
-        )
-        self.view_report_btn = ctk.CTkButton(
-            self.buttons_frame, text="View Full Report", command=self._on_view_report, state="disabled"
-        )
+        self.scan_again_btn = ctk.CTkButton(self.buttons_frame, text="Scan Again", command=self._on_scan_again, state="disabled")
+        self.view_report_btn = ctk.CTkButton(self.buttons_frame, text="View Report", command=self._on_view_report, state="disabled")
         self.close_btn = ctk.CTkButton(self.buttons_frame, text="Close", command=self.destroy)
 
-        self.scan_again_btn.grid(row=0, column=0, padx=8, pady=8, sticky="ew")
-        self.view_report_btn.grid(row=0, column=1, padx=8, pady=8, sticky="ew")
-        self.close_btn.grid(row=0, column=2, padx=8, pady=8, sticky="ew")
+        self.scan_again_btn.grid(row=0, column=0, padx=5)
+        self.view_report_btn.grid(row=0, column=1, padx=5)
+        self.close_btn.grid(row=0, column=2, padx=5)
 
     def _start_scan(self) -> None:
-        self._set_status("Loading API key...")
         self.spinner.start()
-        self._run_in_thread(self._scan_worker)
-
-    def _set_status(self, text: str) -> None:
-        self.status_label.configure(text=text)
-
-    def _run_in_thread(self, target: Any, *args: Any, **kwargs: Any) -> None:
-        thread = threading.Thread(target=target, args=args, kwargs=kwargs, daemon=True)
-        thread.start()
+        threading.Thread(target=self._scan_worker, daemon=True).start()
 
     def _scan_worker(self) -> None:
+        """Background thread handling the actual VT logic."""
         try:
             self.api_key = load_api_key()
-            self._update_status("Calculating hash...")
             file_hash = sha256_of_file(self.file_path)
-
-            self._update_status("Checking VirusTotal for an existing report...")
+            
+            # 1. Check for existing report
             report = get_file_report(self.api_key, file_hash)
-
-            if report is not None and not self.force_upload:
-                data = report.get("data", {})
-                summary = summarize_report(data)
-                self._update_ui_with_summary(summary, "Existing report")
+            
+            if report and not self.force_upload:
+                summary = summarize_report(report.get("data", {}))
+                self._update_ui_with_summary(summary)
                 return
 
-            if self.force_upload and report is not None:
-                self._update_status("Re-analysing existing file...")
-                reanalyse_data = reanalyse_file(self.api_key, file_hash)
-                analysis_id = reanalyse_data.get("id")
-                if not analysis_id:
-                    raise RuntimeError("Could not determine analysis ID after reanalyse.")
-                self._update_status("Polling analysis status...")
-                analysis_data = poll_analysis(self.api_key, analysis_id)
-                summary = summarize_report(analysis_data)
-                self._update_ui_with_summary(summary, "Re-analysis")
-                return
-
-            self._update_status("Uploading file to VirusTotal...")
-            upload_data = upload_file(self.api_key, self.file_path)
-            analysis_id = upload_data.get("id") or upload_data.get("analysis_id")
-
+            # 2. Force re-analysis or upload new file
+            if self.force_upload and report:
+                self._update_status_text("Triggering re-analysis...")
+                reanal_data = reanalyse_file(self.api_key, file_hash)
+                analysis_id = reanal_data.get("id")
+            else:
+                # Check file size and provide appropriate message
+                file_size_mb = self.file_path.stat().st_size / (1024 * 1024)
+                if file_size_mb > 32:
+                    self._update_status_text(
+                        f"Uploading large file ({file_size_mb:.1f}MB)...\nThis may take several minutes"
+                    )
+                else:
+                    self._update_status_text("Uploading file...")
+                
+                upload_data = upload_file(self.api_key, self.file_path)
+                analysis_id = upload_data.get("id")            
             if not analysis_id:
-                raise RuntimeError("Could not determine analysis ID after upload.")
+                raise RuntimeError("Failed to get analysis ID from VirusTotal. Please try again.")
+            # 3. Wait for VT to finish processing
+            self._update_status_text("Analyzing file...\n(This may take a few minutes)")
+            final_data = poll_analysis(self.api_key, analysis_id)
+            summary = summarize_report(final_data)
+            self._update_ui_with_summary(summary)
 
-            self._update_status("Polling analysis status...")
-            analysis_data = poll_analysis(self.api_key, analysis_id)
-            summary = summarize_report(analysis_data)
-            self._update_ui_with_summary(summary, "New analysis")
+        except Exception as e:
+            self._update_status_text(f"Error: {str(e)}")
+            self.after(0, self.spinner.stop)
+            print(traceback.format_exc())
 
-        except Exception as exc:
-            self._update_status(f"Error: {exc}")
-            print(traceback.format_exc(), file=sys.stderr)
+    def _update_status_text(self, text: str) -> None:
+        self.after(0, lambda: self.status_label.configure(text=text))
+
+    def _update_ui_with_summary(self, summary: AnalysisSummary) -> None:
+        """Main UI update after a scan is finished."""
+        def _apply():
             self.spinner.stop()
-
-    def _update_status(self, text: str) -> None:
-        self.after(0, lambda: self._set_status(text))
-
-    def _update_ui_with_summary(self, summary: AnalysisSummary, context: str) -> None:
-        def _update() -> None:
-            self.spinner.stop()
-            self.spinner.grid_remove()  # Hide the progress bar completely
-
-            # Allow result_frame to expand into the space
-            self.container.grid_rowconfigure(2, weight=1)
-
-            self.status_label.configure(text=f"{context} - {summary.malicious} / {summary.total_engines} detections")
-
+            self.spinner.grid_remove()  # Hide progress bar on completion
+            
+            # Header Update
+            self.status_label.configure(text="Analysis Complete")
+            
+            # Background Color logic (Green for clean, Red for malicious)
             bg_color = "#1f5f1f" if summary.malicious == 0 else "#7f1f1f"
             self.result_frame.configure(fg_color=bg_color)
 
-            self.file_label.configure(text=f"File: {self.file_path.name}")
-            self.sha_label.configure(text=f"SHA-256: {summary.sha256[:12]}...")
-            self.ratio_label.configure(text=f"Detection: {summary.malicious}/{summary.total_engines}")
-            self.status_text.configure(text=("Clean" if summary.malicious == 0 else "Malicious"))
-            self.last_scan_label.configure(text=f"Last Scan: {summary.last_scan_date}")
+            # Metadata calculations
+            size_mb = self.file_path.stat().st_size / (1024 * 1024)
 
-            self.file_label.grid(row=0, column=0, sticky="w", pady=(12, 4), padx=12)
-            self.sha_label.grid(row=1, column=0, sticky="w", pady=4, padx=12)
-            self.ratio_label.grid(row=2, column=0, sticky="w", pady=4, padx=12)
-            self.status_text.grid(row=3, column=0, sticky="w", pady=4, padx=12)
-            self.last_scan_label.grid(row=4, column=0, sticky="w", pady=(4, 12), padx=12)
+            # Populate Labels
+            self.res_file.configure(text=f"File: {self.file_path.name}")
+            self.res_info.configure(text=f"Size: {size_mb:.2f} MB  |  Last Scan: {summary.last_scan_date} {summary.relative_time}")
+            self.res_ratio.configure(text=f"Detection Ratio: {summary.malicious} / {summary.total_engines} ({summary.malicious} Malicious, {summary.suspicious} Suspicious)")
+            self.res_hash.configure(text=f"SHA-256: {summary.sha256}")
+
+            # Layout display
+            self.res_file.grid(row=0, column=0, sticky="w", padx=20, pady=(20, 5))
+            self.res_info.grid(row=1, column=0, sticky="w", padx=20, pady=2)
+            self.res_ratio.grid(row=2, column=0, sticky="w", padx=20, pady=12)
+            self.res_hash.grid(row=3, column=0, sticky="w", padx=20, pady=(0, 20))
 
             self.scan_again_btn.configure(state="normal")
             self.view_report_btn.configure(state="normal")
             self.summary = summary
             self.force_upload = False
 
-        self.after(0, _update)
+        self.after(0, _apply)
 
     def _on_scan_again(self) -> None:
         self.force_upload = True
         self.scan_again_btn.configure(state="disabled")
         self.view_report_btn.configure(state="disabled")
-        self._set_status("Re-scanning (force upload)...")
-        self.spinner.start()
-        self._run_in_thread(self._scan_worker)
+        
+        # Reset UI for re-scan
+        self.result_frame.configure(fg_color="transparent")
+        for widget in self.result_frame.winfo_children():
+            widget.grid_forget()
+        
+        self.spinner.grid()
+        self._start_scan()
 
     def _on_view_report(self) -> None:
-        if not self.summary:
-            return
-        webbrowser.open(self.summary.report_url)
+        if self.summary:
+            webbrowser.open(self.summary.report_url)
 
-
-def main() -> int:
-    parser = argparse.ArgumentParser(description="VirusTotal File Scanner (GUI)")
-    parser.add_argument("file", help="Path to the file to scan")
+def main():
+    parser = argparse.ArgumentParser(description="VirusTotal GUI Scanner")
+    parser.add_argument("file", help="The file path to scan")
     args = parser.parse_args()
 
-    file_path = Path(args.file).expanduser().resolve()
-    if not file_path.exists() or not file_path.is_file():
-        print(f"ERROR: File not found: {file_path}")
-        return 1
+    fpath = Path(args.file).resolve()
+    if not fpath.exists():
+        print(f"File not found: {fpath}")
+        return
 
-    app = VirusTotalScannerApp(file_path)
+    app = VirusTotalScannerApp(fpath)
     app.mainloop()
-    return 0
-
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    main()

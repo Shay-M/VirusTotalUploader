@@ -31,3 +31,5 @@ The script will:
 - Otherwise, upload the file (smart upload based on size)
 - Poll the analysis until complete
 - Print a clean summary of detections
+
+VT_API_KEY "XXXX" /M
